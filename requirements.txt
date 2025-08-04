@@ -4,3 +4,5 @@ pandas
 geopandas
 rasterio
 numpy
+dash
+dash-bootstrap-components

@@ -1,0 +1,7 @@
+system:index,from_year,gain_m2,loss_m2,net_change_m2,to_year,.geo
+0,2018,0.0,0.0,0.0,2019,"{""type"":""MultiPoint"",""coordinates"":[]}"
+1,2019,0.0,0.0,0.0,2020,"{""type"":""MultiPoint"",""coordinates"":[]}"
+2,2020,0.0,0.0,0.0,2021,"{""type"":""MultiPoint"",""coordinates"":[]}"
+3,2021,0.0,0.0,0.0,2022,"{""type"":""MultiPoint"",""coordinates"":[]}"
+4,2022,0.0,0.0,0.0,2023,"{""type"":""MultiPoint"",""coordinates"":[]}"
+5,2023,0.0,0.0,0.0,2024,"{""type"":""MultiPoint"",""coordinates"":[]}"
