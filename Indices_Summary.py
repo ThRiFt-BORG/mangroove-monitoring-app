@@ -26,7 +26,7 @@ years = []
 ndvi_means = []
 ndmi_means = []
 
-for year in range (2018, 2025):
+for year in range (2018, 2026):
     ystr = str(year)
     ndvi_path = os.path.join(NDVI_DIR, f"ndvi_{ystr}.tif") # Path and format of naming for data
     ndmi_path = os.path.join(NDMI_DIR, f"ndmi_{ystr}.tif");
