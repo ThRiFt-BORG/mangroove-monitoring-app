@@ -10,7 +10,7 @@ CHANGE_DIR = "data/changes"
 OUTPUT_CSV = os.path.join(CHANGE_DIR, "mangrove_area_change.csv")
 os.makedirs(CHANGE_DIR, exist_ok=True)
 
-# === 2. Helper to compute area from mask with resolution check ===
+# === 2. Helper to compute area from mask with resolution check (Converting from EPSG:4326{Degrees to Metres})===
 def compute_area_from_mask(tif_path):
     with rasterio.open(tif_path) as src:
         mask = src.read(1)
@@ -21,7 +21,7 @@ def compute_area_from_mask(tif_path):
             pixel_width = transform[0]
             pixel_height = -transform[4]
 
-            if crs.to_string() == "EPSG:4326":
+            if crs.to_string() == "EPSG:4326":   # Reading coordinate system and converting to a metre-based system using 111320 
                 if pixel_width == 0 or pixel_height == 0:
                     pixel_area = 100
                 else:
@@ -31,7 +31,7 @@ def compute_area_from_mask(tif_path):
             else:
                 pixel_area = pixel_width * pixel_height
         except Exception as e:
-            print(f"⚠️ Using fallback pixel area for {tif_path}: {e}")
+            print(f"Using fallback pixel area for {tif_path}: {e}")
             pixel_area = 100
 
         pixel_count = np.sum(mask == 1)
@@ -71,7 +71,7 @@ df.to_csv(OUTPUT_CSV, index=False)
 plt.figure(figsize=(10, 5))
 plt.plot(df["Year"], df["Area_m2"], marker='o', label="Mangrove Area (m²)")
 plt.bar(df["Year"], df["Area_m2"].diff(), alpha=0.4, label="Change (Δ m²)")
-plt.title("Mangrove Area & Yearly Change (2018–2024)")
+plt.title("Mangrove Area & Yearly Change (2018–2025)")
 plt.xlabel("Year")
 plt.ylabel("Area (m²)")
 plt.legend()
