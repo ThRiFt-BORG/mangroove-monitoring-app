@@ -6,3 +6,4 @@ rasterio
 numpy
 dash
 dash-bootstrap-components
+gunicorn
