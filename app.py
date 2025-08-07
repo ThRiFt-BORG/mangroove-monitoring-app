@@ -29,6 +29,7 @@ YEARS = sorted(area_df["Year"].astype(str).tolist())
 
 # Initialize app
 app = dash.Dash(__name__)
+server = app.server  # Required for gunicorn
 app.title = "Mangrove Monitoring Dashboard"
 
 # Layout
