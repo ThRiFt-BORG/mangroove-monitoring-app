@@ -7,4 +7,3 @@ numpy
 dash
 dash-bootstrap-components
 gunicorn
-GDAL
