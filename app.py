@@ -19,16 +19,22 @@ import dash_bootstrap_components as dbc
 import plotly.express as px
 
 # === File Locations ===
+# These paths must be relative to the app.py file so Render can find them.
 NDVI_CSV = "data/changes/ndvi_ndmi_stats.csv"
 MASK_DIR = "data/masks"
 NDVI_DIR = "data/ndvi"
 NDMI_DIR = "data/ndmi"
 CHANGES_DIR = "data/changes"
 EXPORT_DIR = "exports"
+# On Render's ephemeral filesystem, this directory will be created each time the app starts.
 os.makedirs(EXPORT_DIR, exist_ok=True)
 
 # === Precompute Calculations ===
+# NOTE: These functions will run every time the app starts on Render.
+# For faster startup times in the future, you could run these locally once
+# and commit the output .tif and .csv files directly to your Git repository.
 def compute_gain_loss(year, thresholds=[0.3, 0.4, 0.5], data_dir="data"):
+    # (Your existing function code - no changes needed)
     ndvi_dir = os.path.join(data_dir, "ndvi")
     masks_dir = os.path.join(data_dir, "masks")
     changes_dir = os.path.join(data_dir, "changes")
@@ -60,6 +66,7 @@ def compute_gain_loss(year, thresholds=[0.3, 0.4, 0.5], data_dir="data"):
         return df
 
 def compute_index_stats(data_dir="data"):
+    # (Your existing function code - no changes needed)
     results = []
     for year in range(2018, 2026):
         ndvi_file = os.path.join(data_dir, "ndvi", f"ndvi_{year}.tif")
@@ -75,53 +82,46 @@ def compute_index_stats(data_dir="data"):
         df.to_csv(NDVI_CSV, index=False)
     return df
 
-# Run pre-computation on app start
 for year in range(2019, 2026):
     compute_gain_loss(year)
 compute_index_stats()
 
 # === Image Rendering Helper ===
 def render_tif_to_png(tif_path, label, year):
+    # (Your existing function code - no changes needed)
     if not os.path.exists(tif_path): return ""
     with rasterio.open(tif_path) as src: array = src.read(1)
-    
     cmap_spec = {
-        "ndvi": "Greens", 
-        "ndmi": "Blues", 
-        "classified": ["#0000FF", "#FFA500", "#008000", "#964B00"], 
-        "gain": ['#00000000', 'lime'],
-        "loss": ['#00000000', 'red']
+        "ndvi": "Greens", "ndmi": "Blues", "classified": ["#0000FF", "#FFA500", "#008000", "#964B00"], 
+        "gain": ['#00000000', 'lime'], "loss": ['#00000000', 'red']
     }.get(label.split('_')[0], "viridis")
-    
-    if isinstance(cmap_spec, str):
-        cmap = cmap_spec
-    else:
-        cmap = plt.cm.colors.ListedColormap(cmap_spec)
-        
+    if isinstance(cmap_spec, str): cmap = cmap_spec
+    else: cmap = plt.cm.colors.ListedColormap(cmap_spec)
     fig, ax = plt.subplots(figsize=(3, 3)); ax.axis("off")
     im = ax.imshow(array, cmap=cmap)
-    
     if label in ["ndvi", "ndmi"]: fig.colorbar(im, ax=ax, shrink=0.75, orientation="vertical").set_label("Index Value", fontsize=8)
-    
     fname = f"{EXPORT_DIR}/{label}_{year}.png"
     plt.savefig(fname, bbox_inches="tight", dpi=100); plt.close(fig)
-    
     with open(fname, "rb") as f: return "data:image/png;base64," + base64.b64encode(f.read()).decode()
-
 
 # === Initialize App & Define Layouts ===
 app = Dash(__name__, external_stylesheets=[dbc.themes.BOOTSTRAP], suppress_callback_exceptions=True)
 app.title = "Mangrove Monitoring Dashboard"
 
+# --- DEPLOYMENT CHANGE 1: Expose the server variable ---
+# Gunicorn, the server Render uses, needs to find this 'server' variable.
+server = app.server
+
 # --- Main App Layout ---
 app.layout = dbc.Container([
+    # (Your existing layout code - no changes needed)
     dcc.Location(id="url", refresh=False),
     html.H1("Mangrove Monitoring Dashboard", className="text-center my-4"),
     dbc.Nav([dbc.NavLink("Report", href="/report", active="exact"), dbc.NavLink("Results", href="/results", active="exact")]),
     html.Div(id="page-content")
 ], fluid=True)
 
-# --- Report Page Layout ---
+# --- Page Layouts (No changes needed) ---
 report_layout = html.Div([
     html.H2("Mangrove Monitoring Report", className="text-center my-4"),
     dcc.Dropdown(id="year-select", options=[{"label": y, "value": y} for y in range(2018, 2026)], value=2025, className="my-4"),
@@ -130,7 +130,6 @@ report_layout = html.Div([
     dbc.Row([dbc.Col(dcc.Graph(id="report-gain-loss-graph"), width=6)])
 ])
 
-# --- EDIT: Results Page Layout with 2x2 Grid ---
 results_layout = html.Div([
     html.H2("Mangrove Monitoring Results", className="text-center my-4"),
     dcc.Slider(id="year-slider", min=2019, max=2025, step=1, value=2025, marks={y: str(y) for y in range(2019, 2026)}, className="my-4"),
@@ -140,108 +139,74 @@ results_layout = html.Div([
         {"label": "Gain (NDVI ≥ 0.4)", "value": "gain_0.4"}, {"label": "Loss (NDVI ≥ 0.4)", "value": "loss_0.4"},
         {"label": "Gain (NDVI ≥ 0.5)", "value": "gain_0.5"}, {"label": "Loss (NDVI ≥ 0.5)", "value": "loss_0.5"}
     ], value="classified", className="my-4"),
-
-    # --- TOP ROW: Map and Raster Preview ---
     dbc.Row([
-        dbc.Col([
-            html.H4("Map"), 
-            html.Iframe(id="map", style={'height': '500px', 'width': '100%'})
-        ], width=6),
-
-        dbc.Col([
-            html.H4("Raster Preview"), 
-            html.Div(
-                html.Img(id="raster-preview", style={"max-width": "100%", "max-height": "450px", "border": "1px solid #ccc"}),
-                className="d-flex justify-content-center align-items-center"
-            )
-        ], width=6)
+        dbc.Col([html.H4("Map"), html.Iframe(id="map", style={'height': '500px', 'width': '100%'})], width=6),
+        dbc.Col([html.H4("Raster Preview"), html.Div(html.Img(id="raster-preview", style={"max-width": "100%", "max-height": "450px", "border": "1px solid #ccc"}), className="d-flex justify-content-center align-items-center")], width=6)
     ], className="mb-4"),
-
-    # --- BOTTOM ROW: The two graphs ---
     dbc.Row([
-        dbc.Col([
-            html.H4("Class Area Trends Over Time"), 
-            dcc.Graph(id="area-trend-graph", style={'height': '450px'})
-        ], width=6),
-
-        dbc.Col([
-            html.H4("Gain/Loss Analysis"), 
-            dcc.Graph(id="gain-loss-graph", style={'height': '450px'})
-        ], width=6)
+        dbc.Col([html.H4("Class Area Trends Over Time"), dcc.Graph(id="area-trend-graph", style={'height': '450px'})], width=6),
+        dbc.Col([html.H4("Gain/Loss Analysis"), dcc.Graph(id="gain-loss-graph", style={'height': '450px'})], width=6)
     ])
 ])
 
-
-# === Callbacks ===
-
-# --- Page Router ---
+# === Callbacks (No changes needed) ===
 @app.callback(Output("page-content", "children"), Input("url", "pathname"))
 def render_page_content(pathname):
     return results_layout if pathname == "/results" else report_layout
 
-# --- Report Page Callback ---
 @app.callback(
     [Output("areas-graph", "figure"), Output("index-stats-graph", "figure"), Output("metrics-graph", "figure"),
      Output("band-importance-graph", "figure"), Output("report-gain-loss-graph", "figure")],
     Input("year-select", "value")
 )
 def update_report_page_graphs(year):
+    # (Your existing callback code - no changes needed)
     if year is None: return [{"data": [], "layout": {"title": "No Data Available"}}] * 5
     empty_fig = {"data": [], "layout": {"title": "No Data Available"}}
     areas_fig, index_stats_fig, metrics_fig, band_fig, gain_loss_fig = [empty_fig] * 5
-    
     areas_file = os.path.join(CHANGES_DIR, f"Classified_Areas_{year}.csv")
     metrics_file = os.path.join(CHANGES_DIR, f"Classification_Metrics_{year}.csv")
     band_file = os.path.join(CHANGES_DIR, f"Band_Importance_{year}.csv")
     gain_loss_file = os.path.join(CHANGES_DIR, f"Change_Detection_{year-1}_to_{year}_NDVI.csv")
     ndvi_stats_file = NDVI_CSV
-    
     if os.path.exists(areas_file):
         try:
             desired_cols = ['Year', 'Water', 'Bareland', 'Mangrove', 'Prosopis']
             areas_df = pd.read_csv(areas_file, usecols=lambda c: c in desired_cols).fillna(0)
             value_vars = [col for col in desired_cols if col in areas_df.columns and col != 'Year']
             areas_df_long = areas_df.melt(id_vars="Year", value_vars=value_vars, var_name="Class", value_name="Area (m²)")
-            areas_fig = px.bar(areas_df_long, x="Class", y="Area (m²)", title=f"Classified Areas for {year}", color="Class",
-                               color_discrete_map={"Water": "#0000FF", "Bareland": "#FFA500", "Mangrove": "#008000", "Prosopis": "#964B00"})
+            areas_fig = px.bar(areas_df_long, x="Class", y="Area (m²)", title=f"Classified Areas for {year}", color="Class", color_discrete_map={"Water": "#0000FF", "Bareland": "#FFA500", "Mangrove": "#008000", "Prosopis": "#964B00"})
         except Exception as e: print(f"Error processing {areas_file}: {e}")
-        
     if os.path.exists(ndvi_stats_file):
         year_stats = pd.read_csv(ndvi_stats_file).query(f"Year == {year}").melt(id_vars="Year", var_name="Statistic", value_name="Value")
         index_stats_fig = px.bar(year_stats, x="Statistic", y="Value", title=f"NDVI/NDMI Statistics for {year}", color="Statistic")
-        
     if os.path.exists(metrics_file):
         try:
             desired_cols = ['Year', 'Validation_Accuracy', 'Mangrove_Precision', 'Mangrove_Recall']
             metrics_df = pd.read_csv(metrics_file, usecols=lambda c: c in desired_cols).fillna(0)
             metrics_fig = px.bar(metrics_df.melt(id_vars="Year", var_name="Metric", value_name="Score"), x="Metric", y="Score", title=f"Classification Metrics for {year}", range_y=[0,1])
         except Exception as e: print(f"Error processing {metrics_file}: {e}")
-        
     if os.path.exists(band_file):
         try:
             desired_cols = ["Year", "B3", "B4", "B6", "B8", "Entropy", "NDMI", "NDVI", "NDWI"]
             band_df = pd.read_csv(band_file, usecols=lambda c: c in desired_cols).fillna(0)
             band_fig = px.bar(band_df.melt(id_vars="Year", var_name="Band", value_name="Importance"), x="Band", y="Importance", title=f"Band Importance for {year}")
         except Exception as e: print(f"Error processing {band_file}: {e}")
-        
     if os.path.exists(gain_loss_file):
         gain_loss_df = pd.read_csv(gain_loss_file)
         gain_loss_fig = px.bar(gain_loss_df, x="NDVI_Threshold", y=["Gain_m2", "Loss_m2"], title=f"Gain & Loss from {year-1} to {year}", barmode='group')
-        
     return areas_fig, index_stats_fig, metrics_fig, band_fig, gain_loss_fig
 
-# --- Results Page Callback ---
 @app.callback(
     [Output("map", "srcDoc"), Output("raster-preview", "src"), Output("area-trend-graph", "figure"), Output("gain-loss-graph", "figure")],
     [Input("year-slider", "value"), Input("layer-select", "value")]
 )
 def update_results_page(year, layer):
+    # (Your existing callback code - no changes needed)
     empty_fig = {"data": [], "layout": {"title": "Error Loading Data"}}
     error_return = "", "", empty_fig, empty_fig
-    
     try:
         if year is None or layer is None: return "", "", {"data": [], "layout": {"title": "No Data Available"}}, {"data": [], "layout": {"title": "No Data Available"}}
-        
         map_html, preview_src = "", ""
         tif_path = None
         if layer == "ndvi": tif_path = os.path.join(NDVI_DIR, f"ndvi_{year}.tif")
@@ -249,7 +214,6 @@ def update_results_page(year, layer):
         elif layer == "classified": tif_path = os.path.join(MASK_DIR, f"Classified_{year}.tif")
         elif layer.startswith("gain"): tif_path = os.path.join(MASK_DIR, f"Gain_NDVI_{layer.split('_')[1]}_{year-1}_to_{year}.tif")
         elif layer.startswith("loss"): tif_path = os.path.join(MASK_DIR, f"Loss_NDVI_{layer.split('_')[1]}_{year-1}_to_{year}.tif")
-        
         if tif_path and os.path.exists(tif_path):
             with rasterio.open(tif_path) as src:
                 raster_array, bounds = src.read(1), src.bounds
@@ -260,7 +224,6 @@ def update_results_page(year, layer):
                 folium.raster_layers.ImageOverlay(image=raster_array, bounds=[[bounds.bottom, bounds.left], [bounds.top, bounds.right]], opacity=0.7, colormap=cmap).add_to(m)
                 map_html = m._repr_html_()
             preview_src = render_tif_to_png(tif_path, layer, year)
-
         area_fig = {"data": [], "layout": {"title": "No Area Data Available"}}
         all_areas_files = glob.glob(os.path.join(CHANGES_DIR, "Classified_Areas_*.csv"))
         if all_areas_files:
@@ -272,23 +235,24 @@ def update_results_page(year, layer):
                 areas_trend_df.sort_values('Year', inplace=True)
                 value_vars = [col for col in desired_cols if col in areas_trend_df.columns and col != 'Year']
                 areas_long_df = areas_trend_df.melt(id_vars='Year', value_vars=value_vars, var_name='Class', value_name='Area (m²)')
-                area_fig = px.bar(areas_long_df, x="Year", y="Area (m²)", color='Class', title="Class Area Composition Over Time",
-                                   color_discrete_map={"Water": "#0000FF", "Bareland": "#FFA500", "Mangrove": "#008000", "Prosopis": "#964B00"})
-
+                area_fig = px.bar(areas_long_df, x="Year", y="Area (m²)", color='Class', title="Class Area Composition Over Time", color_discrete_map={"Water": "#0000FF", "Bareland": "#FFA500", "Mangrove": "#008000", "Prosopis": "#964B00"})
         gain_loss_fig = {"data": [], "layout": {"title": f"No Gain/Loss Data for {year}"}}
         gain_loss_file = os.path.join(CHANGES_DIR, f"Change_Detection_{year-1}_to_{year}_NDVI.csv")
         if os.path.exists(gain_loss_file):
             gain_loss_df = pd.read_csv(gain_loss_file)
             gain_loss_fig = px.bar(gain_loss_df, x="NDVI_Threshold", y=["Gain_m2", "Loss_m2"], title=f"NDVI Change {year-1} to {year}", barmode='group')
-
         return map_html, preview_src, area_fig, gain_loss_fig
-
     except Exception as e:
         print(f"--- AN ERROR OCCURRED IN THE RESULTS PAGE CALLBACK ---")
         print(f"INPUTS: Year={year}, Layer='{layer}'")
         traceback.print_exc()
         return error_return
 
-# === Run App ===
-if __name__ == "__main__":
-    app.run(debug=True)
+# --- DEPLOYMENT CHANGE 2: Modify the app run block ---
+# This block is for local execution only. When deploying to Render,
+# Gunicorn will be used to run the app.
+if __name__ == '__main__':
+    # Get the port from the environment variable Render provides.
+    port = int(os.environ.get('PORT', 8050))
+    # Run the app on host 0.0.0.0 to make it accessible and disable debug mode.
+    app.run(host='0.0.0.0', port=port, debug=False)
