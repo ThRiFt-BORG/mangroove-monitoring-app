@@ -1,0 +1,346 @@
+import os
+import glob
+import rasterio
+import numpy as np
+import pandas as pd
+from pathlib import Path
+import geemap.foliumap as geemap
+import plotly.graph_objects as go
+from dash import Dash, dcc, html, dash_table, Input, Output
+import dash_bootstrap_components as dbc
+
+# === Precompute Calculations ===
+def compute_gain_loss(year, thresholds=[0.3, 0.4, 0.5], data_dir="data"):
+    ndvi_dir = os.path.join(data_dir, "ndvi")
+    masks_dir = os.path.join(data_dir, "masks")
+    changes_dir = os.path.join(data_dir, "changes")
+    os.makedirs(masks_dir, exist_ok=True)
+    os.makedirs(changes_dir, exist_ok=True)
+
+    curr_file = os.path.join(ndvi_dir, f"NDVI_{year}.tif")
+    prev_file = os.path.join(ndvi_dir, f"NDVI_{year-1}.tif")
+    
+    if not (os.path.exists(curr_file) and os.path.exists(prev_file)):
+        print(f"Missing NDVI files for {year} or {year-1}. Skipping.")
+        return None
+
+    with rasterio.open(curr_file) as curr_ds, rasterio.open(prev_file) as prev_ds:
+        curr_ndvi = curr_ds.read(1)
+        prev_ndvi = prev_ds.read(1)
+        profile = curr_ds.profile
+        transform = curr_ds.transform
+        pixel_area = abs(transform[0] * transform[4])
+
+        results = []
+        for th in thresholds:
+            curr_mask = curr_ndvi >= th
+            prev_mask = prev_ndvi >= th
+            gain = curr_mask & ~prev_mask
+            loss = prev_mask & ~curr_mask
+            gain_area = np.sum(gain) * pixel_area
+            loss_area = np.sum(loss) * pixel_area
+            net_area = gain_area - loss_area
+
+            results.append({
+                "Year": year,
+                "Previous_Year": year - 1,
+                "NDVI_Threshold": th,
+                "Gain_m2": gain_area,
+                "Loss_m2": loss_area,
+                "Net_m2": net_area
+            })
+
+            for mask, name in [(gain, "Gain"), (loss, "Loss")]:
+                output_file = os.path.join(masks_dir, f"{name}_NDVI_{th}_{year-1}_to_{year}.tif")
+                with rasterio.open(output_file, "w", **profile) as dst:
+                    dst.write(mask.astype(np.uint8), 1)
+
+        df = pd.DataFrame(results)
+        csv_file = os.path.join(changes_dir, f"Change_Detection_{year-1}_to_{year}_NDVI.csv")
+        df.to_csv(csv_file, index=False)
+        return df
+
+def compute_mangrove_trends(data_dir="data"):
+    changes_dir = os.path.join(data_dir, "changes")
+    dfs = [pd.read_csv(f) for f in glob.glob(os.path.join(changes_dir, "Classified_Areas_*.csv"))]
+    df = pd.concat(dfs).sort_values("Year")
+    df["Mangrove_Change_Percent"] = df["Mangrove"].pct_change() * 100
+    df = df[["Year", "Mangrove", "Mangrove_Change_Percent"]]
+    df.to_csv(os.path.join(changes_dir, "Mangrove_Trends.csv"), index=False)
+    return df
+
+def compute_index_stats(data_dir="data"):
+    ndvi_dir = os.path.join(data_dir, "ndvi")
+    ndmi_dir = os.path.join(data_dir, "ndmi")
+    changes_dir = os.path.join(data_dir, "changes")
+    results = []
+    for year in range(2018, 2026):
+        ndvi_file = os.path.join(ndvi_dir, f"NDVI_{year}.tif")
+        ndmi_file = os.path.join(ndmi_dir, f"NDMI_{year}.tif")
+        if os.path.exists(ndvi_file) and os.path.exists(ndmi_file):
+            with rasterio.open(ndvi_file) as ndvi_ds, rasterio.open(ndmi_file) as ndmi_ds:
+                ndvi = ndvi_ds.read(1)
+                ndmi = ndmi_ds.read(1)
+                results.append({
+                    "Year": year,
+                    "NDVI_Mean": np.nanmean(ndvi),
+                    "NDVI_Std": np.nanstd(ndvi),
+                    "NDMI_Mean": np.nanmean(ndmi),
+                    "NDMI_Std": np.nanstd(ndmi)
+                })
+    df = pd.DataFrame(results)
+    df.to_csv(os.path.join(changes_dir, "Index_Stats.csv"), index=False)
+    return df
+
+def compute_transitions(year, data_dir="data"):
+    masks_dir = os.path.join(data_dir, "masks")
+    changes_dir = os.path.join(data_dir, "changes")
+    curr_file = os.path.join(masks_dir, f"Classified_{year}.tif")
+    prev_file = os.path.join(masks_dir, f"Classified_{year-1}.tif")
+    if not (os.path.exists(curr_file) and os.path.exists(prev_file)):
+        return None
+    with rasterio.open(curr_file) as curr_ds, rasterio.open(prev_file) as prev_ds:
+        curr_class = curr_ds.read(1)
+        prev_class = prev_ds.read(1)
+        classes = [0, 1, 2, 3]  # Water, Bareland, Mangrove, Prosopis
+        transition_matrix = np.zeros((4, 4))
+        for i in classes:
+            for j in classes:
+                transition_matrix[i, j] = np.sum((prev_class == i) & (curr_class == j))
+        df = pd.DataFrame(
+            transition_matrix,
+            index=["Water", "Bareland", "Mangrove", "Prosopis"],
+            columns=["Water", "Bareland", "Mangrove", "Prosopis"]
+        )
+        df["Year"] = year
+        df.to_csv(os.path.join(changes_dir, f"Transition_{year-1}_to_{year}.csv"))
+        return df
+
+def compute_accuracy_trends(data_dir="data"):
+    changes_dir = os.path.join(data_dir, "changes")
+    dfs = [pd.read_csv(f) for f in glob.glob(os.path.join(changes_dir, "Classification_Metrics_*.csv"))]
+    df = pd.concat(dfs).sort_values("Year")[["Year", "Validation_Accuracy", "Mangrove_Precision", "Mangrove_Recall"]]
+    df.to_csv(os.path.join(changes_dir, "Accuracy_Trends.csv"), index=False)
+    return df
+
+def compute_feature_importance_trends(data_dir="data"):
+    changes_dir = os.path.join(data_dir, "changes")
+    dfs = [pd.read_csv(f) for f in glob.glob(os.path.join(changes_dir, "Band_Importance_*.csv"))]
+    df = pd.concat(dfs).sort_values("Year")
+    df.to_csv(os.path.join(changes_dir, "Feature_Importance_Trends.csv"), index=False)
+    return df
+
+# Precompute all calculations
+for year in range(2019, 2026):
+    compute_gain_loss(year)
+compute_mangrove_trends()
+compute_index_stats()
+for year in range(2019, 2026):
+    compute_transitions(year)
+compute_accuracy_trends()
+compute_feature_importance_trends()
+
+# === Dashboard ===
+app = Dash(__name__, external_stylesheets=[dbc.themes.BOOTSTRAP])
+
+app.layout = dbc.Container([
+    dcc.Location(id="url", refresh=False),
+    html.H1("Mangrove Monitoring Dashboard", className="text-center my-4"),
+    dcc.Link("Report", href="/report", className="btn btn-primary mx-2"),
+    dcc.Link("Results", href="/results", className="btn btn-primary mx-2"),
+    html.Div(id="page-content")
+], fluid=True)
+
+# Page 1: Report
+report_layout = html.Div([
+    html.H2("Mangrove Monitoring Report", className="text-center my-4"),
+    dbc.Row([
+        dbc.Col([
+            html.H4("Gain/Loss Analysis"),
+            dash_table.DataTable(
+                id="gain-loss-table",
+                columns=[{"name": i, "id": i} for i in ["Year", "Previous_Year", "NDVI_Threshold", "Gain_m2", "Loss_m2", "Net_m2"]],
+                style_table={"overflowX": "auto"}
+            )
+        ], width=6),
+        dbc.Col([
+            html.H4("Mangrove Trends"),
+            dash_table.DataTable(
+                id="mangrove-trends-table",
+                columns=[{"name": i, "id": i} for i in ["Year", "Mangrove", "Mangrove_Change_Percent"]],
+                style_table={"overflowX": "auto"}
+            )
+        ], width=6)
+    ]),
+    dbc.Row([
+        dbc.Col([
+            html.H4("NDVI/NDMI Statistics"),
+            dash_table.DataTable(
+                id="index-stats-table",
+                columns=[{"name": i, "id": i} for i in ["Year", "NDVI_Mean", "NDVI_Std", "NDMI_Mean", "NDMI_Std"]],
+                style_table={"overflowX": "auto"}
+            )
+        ], width=6),
+        dbc.Col([
+            html.H4("Class Transitions"),
+            dash_table.DataTable(
+                id="transitions-table",
+                columns=[{"name": i, "id": i} for i in ["Year", "Mangrove_to_Prosopis", "Mangrove_to_Bareland"]],
+                style_table={"overflowX": "auto"}
+            )
+        ], width=6)
+    ]),
+    dbc.Row([
+        dbc.Col([
+            html.H4("Classification Accuracy"),
+            dash_table.DataTable(
+                id="accuracy-table",
+                columns=[{"name": i, "id": i} for i in ["Year", "Validation_Accuracy", "Mangrove_Precision", "Mangrove_Recall"]],
+                style_table={"overflowX": "auto"}
+            )
+        ], width=6),
+        dbc.Col([
+            html.H4("Feature Importance"),
+            dash_table.DataTable(
+                id="feature-importance-table",
+                columns=[{"name": i, "id": i} for i in ["Year", "NDVI", "NDMI", "B4", "B8"]],
+                style_table={"overflowX": "auto"}
+            )
+        ], width=6)
+    ])
+])
+
+# Page 2: Results
+results_layout = html.Div([
+    html.H2("Mangrove Monitoring Results", className="text-center my-4"),
+    dcc.Slider(
+        id="year-slider",
+        min=2019,
+        max=2025,
+        step=1,
+        value=2025,
+        marks={y: str(y) for y in range(2019, 2026)},
+        className="my-4"
+    ),
+    dcc.Dropdown(
+        id="layer-select",
+        options=[
+            {"label": "NDVI", "value": "NDVI"},
+            {"label": "NDMI", "value": "NDMI"},
+            {"label": "Classified", "value": "Classified"},
+            {"label": "Gain (NDVI ≥ 0.3)", "value": "Gain_0.3"},
+            {"label": "Loss (NDVI ≥ 0.3)", "value": "Loss_0.3"}
+        ],
+        value="Classified",
+        className="my-4"
+    ),
+    dbc.Row([
+        dbc.Col([
+            html.H4("Map"),
+            html.Iframe(id="map", height=500, width="100%")
+        ], width=6),
+        dbc.Col([
+            html.H4("Mangrove Area Trend"),
+            dcc.Graph(id="mangrove-trend-graph"),
+            html.H4("Gain/Loss Analysis"),
+            dcc.Graph(id="gain-loss-graph"),
+            html.H4("Class Transitions"),
+            dcc.Graph(id="transition-heatmap")
+        ], width=6)
+    ])
+])
+
+@app.callback(
+    Output("page-content", "children"),
+    Input("url", "pathname")
+)
+def render_page(pathname):
+    if pathname == "/report":
+        return report_layout
+    return results_layout
+
+@app.callback(
+    [
+        Output("gain-loss-table", "data"),
+        Output("mangrove-trends-table", "data"),
+        Output("index-stats-table", "data"),
+        Output("transitions-table", "data"),
+        Output("accuracy-table", "data"),
+        Output("feature-importance-table", "data"),
+        Output("map", "srcDoc"),
+        Output("mangrove-trend-graph", "figure"),
+        Output("gain-loss-graph", "figure"),
+        Output("transition-heatmap", "figure")
+    ],
+    [Input("year-slider", "value"), Input("layer-select", "value")]
+)
+def update_dashboard(year, layer):
+    # Load data
+    gain_loss_dfs = [pd.read_csv(f) for f in glob.glob("data/changes/Change_Detection_*.csv")]
+    gain_loss_df = pd.concat(gain_loss_dfs).sort_values("Year")
+    mangrove_trends_df = pd.read_csv("data/changes/Mangrove_Trends.csv")
+    index_stats_df = pd.read_csv("data/changes/Index_Stats.csv")
+    transitions_dfs = [pd.read_csv(f) for f in glob.glob("data/changes/Transition_*.csv")]
+    transitions_df = pd.concat(transitions_dfs).sort_values("Year")
+    accuracy_df = pd.read_csv("data/changes/Accuracy_Trends.csv")
+    feature_importance_df = pd.read_csv("data/changes/Feature_Importance_Trends.csv")
+
+    # Filter for selected year
+    gain_loss_data = gain_loss_df[gain_loss_df["Year"] == year].to_dict("records")
+    mangrove_trends_data = mangrove_trends_df.to_dict("records")
+    index_stats_data = index_stats_df.to_dict("records")
+    transitions_data = transitions_df[transitions_df["Year"] == year][["Year", "Mangrove_to_Prosopis", "Mangrove_to_Bareland"]].to_dict("records")
+    accuracy_data = accuracy_df.to_dict("records")
+    feature_importance_data = feature_importance_df[["Year", "NDVI", "NDMI", "B4", "B8"]].to_dict("records")
+
+    # Map
+    m = geemap.Map()
+    if layer == "NDVI":
+        m.add_raster(f"data/ndvi/NDVI_{year}.tif", colormap="Greens", layer_name="NDVI")
+    elif layer == "NDMI":
+        m.add_raster(f"data/ndmi/NDMI_{year}.tif", colormap="Blues", layer_name="NDMI")
+    elif layer == "Classified":
+        m.add_raster(f"data/masks/Classified_{year}.tif", colormap=["blue", "orange", "green", "brown"], layer_name="Classified")
+    elif layer == "Gain_0.3":
+        m.add_raster(f"data/masks/Gain_NDVI_0.3_{year-1}_to_{year}.tif", colormap="lime", layer_name="Gain")
+    elif layer == "Loss_0.3":
+        m.add_raster(f"data/masks/Loss_NDVI_0.3_{year-1}_to_{year}.tif", colormap="red", layer_name="Loss")
+    map_html = m.to_streamlit()
+
+    # Mangrove trend graph
+    mangrove_fig = go.Figure()
+    mangrove_fig.add_trace(go.Scatter(x=mangrove_trends_df["Year"], y=mangrove_trends_df["Mangrove"], name="Mangrove Area (m²)"))
+    mangrove_fig.update_layout(title="Mangrove Area Trend", xaxis_title="Year", yaxis_title="Area (m²)")
+
+    # Gain/loss graph
+    gain_loss_year = gain_loss_df[gain_loss_df["Year"] == year]
+    gain_loss_fig = go.Figure()
+    gain_loss_fig.add_trace(go.Bar(x=gain_loss_year["NDVI_Threshold"], y=gain_loss_year["Gain_m2"], name="Gain", marker_color="lime"))
+    gain_loss_fig.add_trace(go.Bar(x=gain_loss_year["NDVI_Threshold"], y=gain_loss_year["Loss_m2"], name="Loss", marker_color="red"))
+    gain_loss_fig.update_layout(barmode="stack", title=f"NDVI Change {year-1} to {year} (m²)", xaxis_title="NDVI Threshold", yaxis_title="Area (m²)")
+
+    # Transition heatmap
+    transition_year = transitions_df[transitions_df["Year"] == year].drop(columns=["Year"])
+    transition_fig = go.Figure(data=go.Heatmap(
+        z=transition_year.values,
+        x=transition_year.columns,
+        y=transition_year.index,
+        colorscale="Viridis"
+    ))
+    transition_fig.update_layout(title=f"Class Transitions {year-1} to {year}", xaxis_title="To Class", yaxis_title="From Class")
+
+    return (
+        gain_loss_data,
+        mangrove_trends_data,
+        index_stats_data,
+        transitions_data,
+        accuracy_data,
+        feature_importance_data,
+        map_html,
+        mangrove_fig,
+        gain_loss_fig,
+        transition_fig
+    )
+
+if __name__ == "__main__":
+    app.run_server(debug=True)

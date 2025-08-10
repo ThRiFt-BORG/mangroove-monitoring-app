@@ -1,0 +1,2 @@
+system:index,Bareland_Precision,Bareland_Recall,Mangrove_Precision,Mangrove_Recall,Prosopis_Precision,Prosopis_Recall,Validation_Accuracy,Validation_Kappa,Water_Precision,Water_Recall,Year,.geo
+0,0.9090909090909091,0.8695652173913043,0.9565217391304348,0.9565217391304348,0.9565217391304348,1.0,91.56626506024097,88.6589888737068,0.8,0.8,2022,"{""type"":""MultiPoint"",""coordinates"":[]}"

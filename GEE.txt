@@ -1,0 +1,621 @@
+ /***************************************************************
+  Integrated NDVI/NDMI/NDWI Time-series + Year/Monthly RF Classification
+  - Preserves your logic and variable names
+  - Adds month selector for monthly composites (Jan..Dec + "All")
+  - Cross-validation fold creation
+  - Safe checks for zero-image months
+***************************************************************/
+
+// === IMPORT / INPUT NOTES ===
+// Before running, make sure these variables exist in the script imports:
+//   aoi          : Geometry or Feature (imported from Assets)
+//   Water        : FeatureCollection (class 0)
+// - Bareland     : FeatureCollection (class 1)
+// - Mangroove    : FeatureCollection (class 2)
+// - Prosopis     : FeatureCollection (class 3)
+// If you imported them under different names, change the names below.
+// Using Ctrl (held down, highlight the lines commented out ,then Ctrl + / to uncomment )
+var SENTINEL_COLLECTION = 'COPERNICUS/S2_SR_HARMONIZED';
+
+// === PARAMETERS ===
+var YEARS = ee.List.sequence(2018, 2025);
+var SCALE = 16;
+var RF_PARAMS = {numberOfTrees: 50, maxNodes: 50, seed: 42}; // kept your style but slightly increased trees
+var CLOUDY_PIXEL_PERCENTAGE_MAX = 20 // slightly more permissive than 10 for monthly coverage
+
+// === Helper: cloud mask for Sentinel-2 SR Harmonized ===
+// Uses QA60 bitmask for clouds/cirrus like original, but selects only base bands once.
+function maskS2(image) {
+  var qa = image.select('QA60');
+  var cloudBit = 1 << 10;
+  var cirrusBit = 1 << 11;
+  var qaMask = qa.bitwiseAnd(cloudBit).eq(0).and(qa.bitwiseAnd(cirrusBit).eq(0));
+  // Keep the original band names that we will use; do not duplicate
+  var base = image.select(['B2','B3','B4','B5','B6','B7','B8','B8A','B11','B12']);
+  // scale to reflect SR (original used divide(10000))
+  return base.updateMask(qaMask).divide(10000).copyProperties(image, image.propertyNames());
+}
+
+function addIndices(image) {
+  var ndvi = image.normalizedDifference(['B8', 'B4']).rename('NDVI');
+  var ndmi = image.normalizedDifference(['B8', 'B11']).rename('NDMI');
+  var ndwi = image.normalizedDifference(['B3', 'B8']).rename('NDWI');
+  var b4Int = image.select('B4').multiply(10000).toInt16(); // Convert to int16 for GLCM
+  var glcm = b4Int.glcmTexture({size: 3});
+  var entropy = glcm.select('B4_ent').rename('Entropy');
+  return image.addBands([ndvi, ndmi, ndwi, entropy]);
+}
+
+// === Utility: month window helper ===
+function getMonthInterval(year, month) {
+  // month: integer 1..12 ; if month === 0 -> full year
+  if (month === 0) {
+    var start = ee.Date.fromYMD(year, 1, 1);
+    var end = start.advance(1, 'year');
+    return {start: start, end: end};
+  } else {
+    var start = ee.Date.fromYMD(year, month, 1);
+    var end = start.advance(1, 'month');
+    return {start: start, end: end};
+  }
+}
+
+// === Get composite for a given year + month (month 0 = whole year) ===
+function getCompositeForYearMonth(year, month) {
+  var interval = getMonthInterval(year, month);
+  var coll = ee.ImageCollection(SENTINEL_COLLECTION)
+    .filterBounds(aoi)
+    .filterDate(interval.start, interval.end)
+    .filter(ee.Filter.lt('CLOUDY_PIXEL_PERCENTAGE', CLOUDY_PIXEL_PERCENTAGE_MAX))
+    .map(maskS2)
+    .map(addIndices);
+  return coll;
+}
+
+// === Prepare training FeatureCollection (preserve exactly names) ===
+function prepareClass(fc, classId) {
+  return ee.FeatureCollection(fc).map(function(f) {
+    return ee.Feature(f).set('Class', classId);
+  });
+}
+
+var fcWater = prepareClass(Water, 0);
+var fcBare = prepareClass(Bareland, 1);
+var fcMang = prepareClass(Mangroove, 2);
+var fcPro = prepareClass(Prosopis, 3);
+var targetPointsPro = 60;
+var fcProOversampled = ee.FeatureCollection(fcPro)
+  .randomColumn('rand', RF_PARAMS.seed)
+  .limit(targetPointsPro, 'rand', false)
+  .merge(fcPro); // ~106 points
+var targetPointsBare = 20;
+var fcBareOversampled = ee.FeatureCollection(fcBare)
+  .randomColumn('rand', RF_PARAMS.seed)
+  .limit(targetPointsBare, 'rand', false)
+  .merge(fcBare); // ~80 points
+var pointsAll = fcWater.merge(fcBareOversampled).merge(fcMang).merge(fcProOversampled);
+
+
+// Export.table.toDrive({
+  // collection: aoi,              // AOI FeatureCollection or Feature wrapped as collection
+  // description: 'AOI_Export',    // Export task name
+  // fileFormat: 'Shp',            // KML or GeoJSON or SHP (choose one)
+  // folder: 'GEE_Exports'         // Optional,(will create if missing)
+// });
+
+
+
+// Export.table.toDrive({
+  // collection: pointsAll,
+  // description: 'AllTrainingPointsExport',
+  // fileFormat: 'CSV'
+// });
+
+
+
+// === Utility: reduced band list ===
+var CLASS_BANDS = ['NDVI','NDMI','NDWI','B4','B6','B3','B8','Entropy'];
+
+// === UI: Year selector from your original code + Month selector ===
+var yearListClient = YEARS.getInfo().map(function(y){ return y.toString(); });
+
+var selectYear = ui.Select({
+  items: yearListClient,
+  placeholder: 'Select year to view & classify',
+  onChange: onYearChange
+});
+
+var monthItems = ['All (Year median)', 'Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
+var selectMonth = ui.Select({
+  items: monthItems,
+  placeholder: 'Select month',
+  onChange: function(m) {
+    // call year change with current year selected so month change updates
+    var cur = selectYear.getValue();
+    if (cur) {
+      onYearChange(cur);
+    }
+  }
+});
+
+// Panel
+var controlPanel = ui.Panel({
+  widgets: [
+    ui.Label('Select Year and Month'),
+    selectYear,
+    selectMonth
+  ],
+  style: { position: 'top-left' }
+});
+Map.add(controlPanel);
+
+// Map and AOI
+Map.centerObject(aoi, 16);
+Map.addLayer(aoi, {color: 'black'}, 'AOI');
+
+// === Print static training class counts chart ===
+var trainingCounts = pointsAll.aggregate_histogram('Class');
+print('Training Point Counts (by Class):', trainingCounts);
+
+var trainingClassIds = trainingCounts.keys();
+var trainingClassCounts = trainingClassIds.map(function(k){ return ee.Number(trainingCounts.get(k)); });
+var trainingLabels = trainingClassIds.map(function(id){
+  var m = ee.Dictionary({'0':'Water','1':'Bareland','2':'Mangroove','3':'Prosopis'});
+  return ee.String(m.get(id));
+});
+var trainingChart = ui.Chart.array.values({
+  array: ee.Array(trainingClassCounts), axis: 0, xLabels: trainingLabels
+}).setChartType('ColumnChart').setOptions({
+  title: 'Training Points: Class Distribution',
+  hAxis: {title: 'Class'},
+  vAxis: {title: 'Count'},
+  legend: 'none'
+});
+print(trainingChart);
+
+// === MAIN: callback when year selected ===
+function onYearChange(selected) {
+  if (!selected) return;
+  Map.layers().reset(); // Clear layers to prevent duplicates
+
+  var year = parseInt(selected, 10);
+  var monthLabel = selectMonth.getValue(); // might be null
+  var monthIndex = 0; // 0 -> whole year by default
+  if (monthLabel && monthLabel !== 'All (Year median)') {
+    monthIndex = monthItems.indexOf(monthLabel); // Jan -> 1 .. Dec -> 12
+    if (monthIndex < 1) monthIndex = 0;
+  }
+
+  Map.layers().reset();
+  Map.addLayer(aoi, {color: 'black'}, 'AOI');
+
+  // Build collection for the selected year/month
+  var coll = getCompositeForYearMonth(year, monthIndex);
+
+  // Client-side count check (small and useful for UI clarity)
+  var count = coll.size().getInfo();
+  print('Image count for ' + year + (monthIndex === 0 ? ' (year): ' : (' month ' + monthIndex + ': ')) , count);
+  if (count === 0) {
+    print('No imagery available for ' + year + (monthIndex === 0 ? '' : (' month ' + monthIndex)) + '. Skipping.');
+    return;
+  }
+
+  // Build the composite (median)
+  var img = coll.median().clip(aoi);
+
+  // Add indices if not present (but we already added via map(addIndices) in getCompositeForYearMonth)
+  // Validate image and bands (server-side check using bandNames)
+  var bandNames = img.bandNames();
+  var requiredBands = ee.List(CLASS_BANDS);
+  var hasAllBands = bandNames.containsAll(requiredBands);
+  if (!hasAllBands.getInfo()) {
+    print('Error: Composite missing required bands. Bands available: ', bandNames.getInfo());
+    return;
+  }
+
+  // Show indices
+  var ndvi = img.select('NDVI');
+  var ndmi = img.select('NDMI');
+  var ndwi = img.select('NDWI');
+  Map.addLayer(ndvi, {min:0, max:1, palette:['ffffff','2ca25f']}, 'NDVI ' + year + ' m:' + monthIndex);
+  Map.addLayer(ndmi, {min:-0.5, max:1, palette:['ffffff','2b8cbe']}, 'NDMI ' + year + ' m:' + monthIndex);
+  Map.addLayer(ndwi, {min:-0.5, max:1, palette:['ffffff','74c476']}, 'NDWI ' + year + ' m:' + monthIndex);
+
+  // Export NDVI and NDMI TIFFs
+  Export.image.toDrive({
+    image: ndvi,
+    description: 'NDVI_' + year,
+    folder: 'GEE_Exports(N)',
+    scale: SCALE,
+    region: aoi,
+    fileFormat: 'GeoTIFF',
+    maxPixels: 1e13
+  });
+  Export.image.toDrive({
+    image: ndmi,
+    description: 'NDMI_' + year,
+    folder: 'GEE_Exports(N)',
+    scale: SCALE,
+    region: aoi,
+    fileFormat: 'GeoTIFF',
+    maxPixels: 1e13
+  });
+
+  // Test thresholds and change detection against previous month/year where appropriate
+  var thresholds = [0.3, 0.4, 0.5];
+  thresholds.forEach(function(th) {
+    var mask = ndvi.gte(th);
+    Map.addLayer(mask.updateMask(mask), {palette: ['006400']}, 'Mask NDVI≥' + th + ' ' + year + ' m:' + monthIndex);
+
+
+ Export.image.toDrive({
+    image: mask,
+    description: 'MASK_' + year,
+    folder: 'GEE_Exports(N)',
+    scale: SCALE,
+    region: aoi,
+    fileFormat: 'GeoTIFF',
+    maxPixels: 1e13
+  });
+
+
+
+
+    // Change detection: compare with same month previous year when possible (more sensible for monthly)
+    var prevYear = year - 1;
+    if (YEARS.getInfo().indexOf(prevYear) >= 0) {
+      var prevColl = getCompositeForYearMonth(prevYear, monthIndex);
+      var prevCount = prevColl.size().getInfo();
+      print('Image count for prev ' + prevYear + ' m:' + monthIndex + ':', prevCount);
+      if (prevCount > 0) {
+        var prevImg = prevColl.median().clip(aoi);
+        // ensure prevImg has NDVI
+        var prevHasNDVI = prevImg.bandNames().contains('NDVI');
+        if (prevHasNDVI.getInfo()) {
+          var prevMask = prevImg.select('NDVI').gte(th);
+          var gain = mask.and(prevMask.not()).updateMask(mask.and(prevMask.not()));
+          var loss = prevMask.and(mask.not()).updateMask(prevMask.and(mask.not()));
+          Map.addLayer(gain, {palette: ['lime']}, 'Gain NDVI≥' + th + ' ' + prevYear + '->' + year + ' m:' + monthIndex);
+  Map.addLayer(loss, {palette: ['red']}, 'Loss NDVI≥' + th + ' ' + prevYear + '->' + year + ' m:' + monthIndex);
+          var pixelArea = ee.Image.pixelArea();
+          var gainArea = pixelArea.updateMask(gain).reduceRegion({
+            reducer: ee.Reducer.sum(), geometry: aoi, scale: SCALE, maxPixels: 1e13
+          }).get('area');
+          var lossArea = pixelArea.updateMask(loss).reduceRegion({
+            reducer: ee.Reducer.sum(), geometry: aoi, scale: SCALE, maxPixels: 1e13
+          }).get('area');
+          print('Change ' + prevYear + '->' + year + ' (NDVI≥' + th + ') (m2): Gain =', gainArea, 'Loss =', lossArea, 'Net =', ee.Number(gainArea).subtract(lossArea));
+
+          // Export gain and loss TIFFs
+          Export.image.toDrive({
+            image: gain,
+            description: 'Gain_NDVI_' + th + '_' + prevYear + '_to_' + year,
+            folder: 'GEE_Exports(N)',
+            scale: SCALE,
+            region: aoi,
+            fileFormat: 'GeoTIFF',
+            maxPixels: 1e13
+  });
+          Export.image.toDrive({
+            image: loss,
+            description: 'Loss_NDVI_' + th + '_' + prevYear + '_to_' + year,
+            folder: 'GEE_Exports(N)',
+            scale: SCALE,
+            region: aoi,
+            fileFormat: 'GeoTIFF',
+            maxPixels: 1e13
+  });
+
+          // Export change detection CSV
+          var changeTable = ee.FeatureCollection([
+            ee.Feature(null, {
+              Year: year,
+              Month: monthIndex === 0 ? 'All' : monthItems[monthIndex],
+              Previous_Year: prevYear,
+              NDVI_Threshold: th,
+              Gain_m2: gainArea,
+              Loss_m2: lossArea,
+              Net_m2: ee.Number(gainArea).subtract(lossArea)
+            })
+          ]);
+          Export.table.toDrive({
+            collection: changeTable,
+            description: 'Change_Detection_' + prevYear + '_to_' + year + '_NDVI_' + th,
+            folder: 'GEE_Exports(N)',
+            fileFormat: 'CSV'
+          });
+        } else {
+          print('Previous composite missing NDVI for ' + prevYear + ' m:' + monthIndex);
+        }
+      } // end prevCount>0
+    } // end if prevYear exists
+  }); // thresholds.forEach
+
+  // === CLASSIFICATION SECTION ===
+  var image_stack = img.select(CLASS_BANDS);
+
+  // Stratified random split (70/30) - server-side
+  var sampleRandom = pointsAll.randomColumn('rand', RF_PARAMS.seed);
+  var trainFC = sampleRandom.filter(ee.Filter.lte('rand', 0.7));
+  var validFC = sampleRandom.filter(ee.Filter.gt('rand', 0.7));
+
+  print('Training points size:', trainFC.size(), 'Validation points size:', validFC.size());
+
+  // Sample pixels for training & validation
+  var trainingSample = image_stack.sampleRegions({
+    collection: trainFC,
+    properties: ['Class'],
+    scale: SCALE,
+    tileScale: 4
+  }).filter(ee.Filter.notNull(CLASS_BANDS));
+
+  var validationSample = image_stack.sampleRegions({
+    collection: validFC,
+    properties: ['Class'],
+    scale: SCALE,
+    tileScale: 4
+  }).filter(ee.Filter.notNull(CLASS_BANDS));
+
+  print('Training sample size:', trainingSample.size());
+  print('Validation sample size:', validationSample.size());
+
+  // Train RF
+  var classifier = ee.Classifier.smileRandomForest(RF_PARAMS).train({
+    features: trainingSample,
+    classProperty: 'Class',
+    inputProperties: CLASS_BANDS
+  });
+
+  // Band importance
+  var importance = ee.Dictionary(classifier.explain().get('importance'));
+  print('Band importance:', importance);
+
+  // Export band importance CSV
+  var bandImportanceTable = ee.FeatureCollection([
+    ee.Feature(null, {
+      Year: year,
+      Month: monthIndex === 0 ? 'All' : monthItems[monthIndex],
+      B3: importance.get('B3'),
+      B4: importance.get('B4'),
+      B6: importance.get('B6'),
+      B8: importance.get('B8'),
+      Entropy: importance.get('Entropy'),
+      NDMI: importance.get('NDMI'),
+      NDVI: importance.get('NDVI'),
+      NDWI: importance.get('NDWI')
+    })
+  ]);
+  Export.table.toDrive({
+    collection: bandImportanceTable,
+    description: 'Band_Importance_' + year,
+    folder: 'GEE_Exports(N)',
+    fileFormat: 'CSV'
+  });
+
+  // Classify image
+  var classified = image_stack.classify(classifier).clip(aoi);
+  Map.addLayer(classified, {min:0, max:3, palette: ['0000FF','FFA500','008000','964B00']}, 'Classification ' + year + ' m:' + monthIndex);
+
+  // Export classified TIFF
+  Export.image.toDrive({
+    image: classified,
+    description: 'Classified_' + year,
+    folder: 'GEE_Exports(N)',
+    scale: SCALE,
+    region: aoi,
+    fileFormat: 'GeoTIFF',
+    maxPixels: 1e13
+  });
+
+  // Classified area histogram per class (area m2)
+  var pixelArea = ee.Image.pixelArea().addBands(classified.rename('class'));
+  var classAreas = ee.List.sequence(0,3).map(function(c) {
+    c = ee.Number(c);
+    var clsMask = classified.eq(c);
+    var area = pixelArea.select(0).updateMask(clsMask).reduceRegion({
+      reducer: ee.Reducer.sum(), geometry: aoi, scale: SCALE, maxPixels: 1e13
+    }).get('area');
+    return ee.Number(area);
+  });
+
+  var classAreaLabels = ['Water','Bareland','Mangrove','Prosopis'];
+  var areaChart = ui.Chart.array.values({
+    array: ee.Array(classAreas), axis: 0, xLabels: classAreaLabels
+  }).setChartType('ColumnChart').setOptions({
+    title: 'Classified Area (m²) - ' + year + ' m:' + monthIndex,
+    hAxis: {title: 'Class'},
+    vAxis: {title: 'Area (m²)'},
+    legend: 'none'
+  });
+  print(areaChart);
+
+  // Export classified areas CSV
+  var classAreaTable = ee.FeatureCollection([
+    ee.Feature(null, {
+      Year: year,
+      Month: monthIndex === 0 ? 'All' : monthItems[monthIndex],
+      Water: classAreas.get(0),
+      Bareland: classAreas.get(1),
+      Mangrove: classAreas.get(2),
+      Prosopis: classAreas.get(3)
+    })
+  ]);
+  Export.table.toDrive({
+    collection: classAreaTable,
+    description: 'Classified_Areas_' + year,
+    folder: 'GEE_Exports(N)',
+    fileFormat: 'CSV'
+  });
+
+  // === CROSS-VALIDATION (3-fold) ===
+  // We'll create folds server-side robustly
+  var k = 3;
+  var n = pointsAll.size();
+  var foldSize = n.divide(k).floor();
+  // Create a deterministic random ordering once
+  var randomized = pointsAll.randomColumn('rand', RF_PARAMS.seed).sort('rand');
+
+  // Convert to list for slicing
+  var pointsList = randomized.toList(randomized.size());
+
+  // Build an ee.List of ee.FeatureCollections (folds)
+  var folds = ee.List.sequence(0, k-1).map(function(i) {
+    i = ee.Number(i);
+    var start = i.multiply(foldSize);
+    var end = start.add(foldSize);
+    var sliceList = pointsList.slice(start, end);
+    return ee.FeatureCollection(sliceList);
+  });
+
+  // Iterate through folds and compute accuracy
+  var cvAccuracies = ee.List([]);
+  var cvKappas = ee.List([]);
+
+  function computeFoldMetrics(foldIndex) {
+    foldIndex = ee.Number(foldIndex);
+    var validFold = ee.FeatureCollection(folds.get(foldIndex));
+    var otherFolds = folds.slice(0, foldIndex).cat(folds.slice(foldIndex.add(1)));
+    var trainFolds = ee.FeatureCollection(ee.List(otherFolds).iterate(function(fc, acc) {
+      acc = ee.FeatureCollection(acc);
+      return acc.merge(ee.FeatureCollection(fc));
+    }, ee.FeatureCollection([])));
+    var trainSample = image_stack.sampleRegions({
+      collection: trainFolds,
+      properties: ['Class'],
+      scale: SCALE,
+      tileScale: 4
+    }).filter(ee.Filter.notNull(CLASS_BANDS));
+
+    var validSample = image_stack.sampleRegions({
+      collection: validFold,
+      properties: ['Class'],
+      scale: SCALE,
+      tileScale: 4
+    }).filter(ee.Filter.notNull(CLASS_BANDS));
+
+    var foldClassifier = ee.Classifier.smileRandomForest(RF_PARAMS).train({
+      features: trainSample,
+      classProperty: 'Class',
+      inputProperties: CLASS_BANDS
+    });
+
+    var validated = validSample.classify(foldClassifier);
+    var errorMatrix = validated.errorMatrix('Class', 'classification');
+    var acc = errorMatrix.accuracy();
+    var kapp = errorMatrix.kappa();
+    return ee.Dictionary({'accuracy': acc.multiply(100), 'kappa': kapp.multiply(100)});
+  }
+
+  var foldMetricsList = ee.List.sequence(0, k-1).map(function(i) {
+    return computeFoldMetrics(i);
+  });
+
+  var foldAccuracies = foldMetricsList.map(function(d) { return ee.Dictionary(d).get('accuracy'); });
+  var foldKappas = foldMetricsList.map(function(d) { return ee.Dictionary(d).get('kappa'); });
+  var meanAccuracy = ee.Number(ee.Array(foldAccuracies).reduce(ee.Reducer.mean(), [0]).get([0]));
+  var meanKappa = ee.Number(ee.Array(foldKappas).reduce(ee.Reducer.mean(), [0]).get([0]));
+  print('Cross-validation accuracy (%):', meanAccuracy);
+  print('Cross-validation kappa (%):', meanKappa);
+
+  // === ACCURACY ASSESSMENT ON HELD-OUT VALIDATION ===
+  var trainMatrix = classifier.confusionMatrix();
+  print('Training confusion matrix:', trainMatrix);
+  print('Training accuracy (%):', trainMatrix.accuracy().multiply(100));
+  print('Training kappa (%):', trainMatrix.kappa().multiply(100));
+
+  var validated = validationSample.classify(classifier);
+  var validMatrix = validated.errorMatrix('Class', 'classification');
+  print('Validation confusion matrix:', validMatrix);
+  print('Validation accuracy (%):', validMatrix.accuracy().multiply(100));
+  print('Validation kappa (%):', validMatrix.kappa().multiply(100));
+
+  // Export classification metrics CSV
+  var metricsTable = ee.FeatureCollection([
+    ee.Feature(null, {
+      Year: year,
+      Month: monthIndex === 0 ? 'All' : monthItems[monthIndex],
+      Water_Precision: ee.Number(cmArray.get([0, 0])).divide(ee.Number(ee.Array(consumers).get([0, 0]))),
+      Water_Recall: ee.Number(cmArray.get([0, 0])).divide(ee.Number(ee.Array(producers).get([0, 0]))),
+      Bareland_Precision: ee.Number(cmArray.get([1, 1])).divide(ee.Number(ee.Array(consumers).get([0, 1]))),
+      Bareland_Recall: ee.Number(cmArray.get([1, 1])).divide(ee.Number(ee.Array(producers).get([1, 0]))),
+      Mangrove_Precision: ee.Number(cmArray.get([2, 2])).divide(ee.Number(ee.Array(consumers).get([0, 2]))),
+      Mangrove_Recall: ee.Number(cmArray.get([2, 2])).divide(ee.Number(ee.Array(producers).get([2, 0]))),
+      Prosopis_Precision: ee.Number(cmArray.get([3, 3])).divide(ee.Number(ee.Array(consumers).get([0, 3]))),
+      Prosopis_Recall: ee.Number(cmArray.get([3, 3])).divide(ee.Number(ee.Array(producers).get([3, 0]))),
+      Validation_Accuracy: validMatrix.accuracy().multiply(100),
+      Validation_Kappa: validMatrix.kappa().multiply(100),
+      Cross_Validation_Accuracy: meanAccuracy,
+      Cross_Validation_Kappa: meanKappa
+    })
+  ]);
+  Export.table.toDrive({
+    collection: metricsTable,
+    description: 'Classification_Metrics_' + year + '_m' + monthIndex,
+    folder: 'GEE_Exports(N)',
+    fileFormat: 'CSV'
+  });
+
+  // === Per-class precision / recall (validation) ===
+  var cmArray = validMatrix.array();
+  var producers = cmArray.reduce(ee.Reducer.sum(), [1]); // row sums
+  var consumers = cmArray.reduce(ee.Reducer.sum(), [0]); // column sums
+  var nClasses = 4;
+  for (var i = 0; i < nClasses; i++) {
+    var TP = ee.Number(cmArray.get([i, i]));
+    var producerSum = ee.Number(ee.Array(producers).get([i, 0]));
+    var consumerSum = ee.Number(ee.Array(consumers).get([0, i]));
+    var precision = ee.Algorithms.If(consumerSum.eq(0), null, TP.divide(consumerSum));
+    var recall = ee.Algorithms.If(producerSum.eq(0), null, TP.divide(producerSum));
+    print('Class ' + i + ' (' + classAreaLabels[i] + ') Precision:', precision, 'Recall:', recall);
+  }
+
+} // end onYearChange
+
+// === Pre-select latest year and "All" month ===
+selectYear.setValue(yearListClient[yearListClient.length - 1]);
+selectMonth.setValue('All (Year median)');
+
+// === LULC Legend ===
+var classNames = ['Water', 'Bareland', 'Mangrove', 'Prosopis'];
+var classColors = ['0000FF', 'FFA500', '008000', '964B00'];
+
+function makeLegend(title, names, colors) {
+  var legend = ui.Panel({
+    style: {
+      position: 'bottom-left',
+      padding: '8px 15px'
+    }
+  });
+  var legendTitle = ui.Label({
+    value: title,
+    style: {
+      fontWeight: 'bold',
+      fontSize: '14px',
+      margin: '0 0 4px 0',
+      padding: '0'
+    }
+  });
+  legend.add(legendTitle);
+  for (var i = 0; i < names.length; i++) {
+    var colorBox = ui.Label({
+      style: {
+        backgroundColor: '#' + colors[i],
+        padding: '8px',
+        margin: '0 0 4px 0'
+      }
+    });
+    var description = ui.Label({
+      value: names[i],
+      style: {margin: '0 0 4px 6px'}
+    });
+    var row = ui.Panel({
+      widgets: [colorBox, description],
+      layout: ui.Panel.Layout.Flow('horizontal')
+    });
+    legend.add(row);
+  }
+  return legend;
+}
+
+var lulcLegend = makeLegend('LULC Classes', classNames, classColors);
+Map.add(lulcLegend);
