@@ -19,22 +19,17 @@ import dash_bootstrap_components as dbc
 import plotly.express as px
 
 # === File Locations ===
-# These paths must be relative to the app.py file so Render can find them.
 NDVI_CSV = "data/changes/ndvi_ndmi_stats.csv"
 MASK_DIR = "data/masks"
 NDVI_DIR = "data/ndvi"
 NDMI_DIR = "data/ndmi"
 CHANGES_DIR = "data/changes"
 EXPORT_DIR = "exports"
-# On Render's ephemeral filesystem, this directory will be created each time the app starts.
 os.makedirs(EXPORT_DIR, exist_ok=True)
 
 # === Precompute Calculations ===
-# NOTE: These functions will run every time the app starts on Render.
-# For faster startup times in the future, you could run these locally once
-# and commit the output .tif and .csv files directly to your Git repository.
 def compute_gain_loss(year, thresholds=[0.3, 0.4, 0.5], data_dir="data"):
-    # (Your existing function code - no changes needed)
+    # (Your existing function code - no changes)
     ndvi_dir = os.path.join(data_dir, "ndvi")
     masks_dir = os.path.join(data_dir, "masks")
     changes_dir = os.path.join(data_dir, "changes")
@@ -66,7 +61,7 @@ def compute_gain_loss(year, thresholds=[0.3, 0.4, 0.5], data_dir="data"):
         return df
 
 def compute_index_stats(data_dir="data"):
-    # (Your existing function code - no changes needed)
+    # (Your existing function code - no changes)
     results = []
     for year in range(2018, 2026):
         ndvi_file = os.path.join(data_dir, "ndvi", f"ndvi_{year}.tif")
@@ -88,7 +83,7 @@ compute_index_stats()
 
 # === Image Rendering Helper ===
 def render_tif_to_png(tif_path, label, year):
-    # (Your existing function code - no changes needed)
+    # (Your existing function code - no changes)
     if not os.path.exists(tif_path): return ""
     with rasterio.open(tif_path) as src: array = src.read(1)
     cmap_spec = {
@@ -107,29 +102,49 @@ def render_tif_to_png(tif_path, label, year):
 # === Initialize App & Define Layouts ===
 app = Dash(__name__, external_stylesheets=[dbc.themes.BOOTSTRAP], suppress_callback_exceptions=True)
 app.title = "Mangrove Monitoring Dashboard"
-
-# --- DEPLOYMENT CHANGE 1: Expose the server variable ---
-# Gunicorn, the server Render uses, needs to find this 'server' variable.
 server = app.server
 
 # --- Main App Layout ---
 app.layout = dbc.Container([
-    # (Your existing layout code - no changes needed)
     dcc.Location(id="url", refresh=False),
     html.H1("Mangrove Monitoring Dashboard", className="text-center my-4"),
     dbc.Nav([dbc.NavLink("Report", href="/report", active="exact"), dbc.NavLink("Results", href="/results", active="exact")]),
     html.Div(id="page-content")
 ], fluid=True)
 
-# --- Page Layouts (No changes needed) ---
+
+# --- EDIT: ADD THE REPORT TEXT AS A MARKDOWN COMPONENT ---
+report_introduction = dcc.Markdown("""
+    ### About This Analysis
+    This dashboard provides a comprehensive analysis of mangrove forest health and coverage over time, derived from satellite imagery. By leveraging key remote sensing indices and machine learning, we can effectively monitor changes, identify areas of degradation, and quantify the extent of mangrove ecosystems.
+
+    #### Methodology
+    The analysis is built on two primary vegetation indices and a supervised classification model:
+    *   **NDVI (Normalized Difference Vegetation Index):** A crucial indicator of vegetation health and density. Higher NDVI values typically correspond to more vigorous and dense mangrove canopies.
+    *   **NDMI (Normalized Difference Moisture Index):** This index is sensitive to the moisture levels in vegetation, making it highly effective for identifying and mapping mangrove forests, which are characterized by high water content.
+    *   **Land Cover Classification:** A machine learning model has been trained to classify the terrain into distinct categories: **Mangrove**, **Water**, **Bareland**, and the invasive **Prosopis** species. This allows for precise area calculations for each class.
+
+    #### Understanding the Visuals
+    The graphs on this page provide a high-level summary for the selected year. The **Gain/Loss** analysis specifically highlights areas where the mangrove canopy has either expanded or retracted compared to the previous year, based on changes in NDVI values exceeding a defined threshold. For a detailed spatial view, please navigate to the **Results** page.
+    """, className="my-4")
+
+
+# --- Report Page Layout (NOW INCLUDES THE INTRODUCTION) ---
 report_layout = html.Div([
     html.H2("Mangrove Monitoring Report", className="text-center my-4"),
+    
+    # The new report text is placed here
+    dbc.Row(dbc.Col(report_introduction)),
+
+    html.Hr(), # Adds a horizontal line for separation
+
     dcc.Dropdown(id="year-select", options=[{"label": y, "value": y} for y in range(2018, 2026)], value=2025, className="my-4"),
     dbc.Row([dbc.Col(dcc.Graph(id="areas-graph"), width=6), dbc.Col(dcc.Graph(id="index-stats-graph"), width=6)]),
     dbc.Row([dbc.Col(dcc.Graph(id="metrics-graph"), width=6), dbc.Col(dcc.Graph(id="band-importance-graph"), width=6)]),
     dbc.Row([dbc.Col(dcc.Graph(id="report-gain-loss-graph"), width=6)])
 ])
 
+# --- Results Page Layout (Unchanged) ---
 results_layout = html.Div([
     html.H2("Mangrove Monitoring Results", className="text-center my-4"),
     dcc.Slider(id="year-slider", min=2019, max=2025, step=1, value=2025, marks={y: str(y) for y in range(2019, 2026)}, className="my-4"),
@@ -149,7 +164,8 @@ results_layout = html.Div([
     ])
 ])
 
-# === Callbacks (No changes needed) ===
+
+# === Callbacks (All callbacks remain unchanged) ===
 @app.callback(Output("page-content", "children"), Input("url", "pathname"))
 def render_page_content(pathname):
     return results_layout if pathname == "/results" else report_layout
@@ -160,7 +176,7 @@ def render_page_content(pathname):
     Input("year-select", "value")
 )
 def update_report_page_graphs(year):
-    # (Your existing callback code - no changes needed)
+    # (Your existing callback code - no changes)
     if year is None: return [{"data": [], "layout": {"title": "No Data Available"}}] * 5
     empty_fig = {"data": [], "layout": {"title": "No Data Available"}}
     areas_fig, index_stats_fig, metrics_fig, band_fig, gain_loss_fig = [empty_fig] * 5
@@ -202,7 +218,7 @@ def update_report_page_graphs(year):
     [Input("year-slider", "value"), Input("layer-select", "value")]
 )
 def update_results_page(year, layer):
-    # (Your existing callback code - no changes needed)
+    # 
     empty_fig = {"data": [], "layout": {"title": "Error Loading Data"}}
     error_return = "", "", empty_fig, empty_fig
     try:
@@ -248,11 +264,7 @@ def update_results_page(year, layer):
         traceback.print_exc()
         return error_return
 
-# --- DEPLOYMENT CHANGE 2: Modify the app run block ---
-# This block is for local execution only. When deploying to Render,
-# Gunicorn will be used to run the app.
+# === Run App ===
 if __name__ == '__main__':
-    # Get the port from the environment variable Render provides.
     port = int(os.environ.get('PORT', 8050))
-    # Run the app on host 0.0.0.0 to make it accessible and disable debug mode.
     app.run(host='0.0.0.0', port=port, debug=False)
